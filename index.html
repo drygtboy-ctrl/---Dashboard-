@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>scrapeops — моніторинг цін маркетплейсів</title>
+<meta name="description" content="Панель керування системою парсингу та моніторингу цін маркетплейсів">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // Палітра: графіт, неоновий смарагд (neon), бурштин (amb), червоний для демпінгу (bad)
+  tailwind.config = { theme: { extend: {
+    colors: { ink: '#0d0f12', panel: '#14171b', line: '#242930', neon: '#2bffb0', amb: '#ffb21e', bad: '#ff5d6c' },
+    fontFamily: { sans: ['"IBM Plex Sans"', 'system-ui', 'sans-serif'], mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'] }
+  } } }
+</script>
+<style>
+  @keyframes blink { 50% { opacity: 0 } }
+  @keyframes flash { from { background: rgba(255,178,30,.22) } to { background: transparent } }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(12px) } to { opacity: 1; transform: none } }
+  .caret { animation: blink 1s steps(1) infinite }
+  .flash { animation: flash 1.6s ease-out }
+  .toast { animation: toastIn .25s ease both; transition: opacity .3s, transform .3s }
+  .toast.out { opacity: 0; transform: translateY(8px) }
+  button:focus-visible, input:focus-visible { outline: 2px solid #2bffb0; outline-offset: 2px }
+  #con::-webkit-scrollbar { width: 8px } #con::-webkit-scrollbar-thumb { background: #2a2f37; border-radius: 4px }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important } }
+</style>
+</head>
+<body class="bg-ink text-zinc-200 font-sans antialiased min-h-screen">
+
+<!-- Верхня панель статусу -->
+<header class="sticky top-0 z-30 border-b border-line bg-panel/80 backdrop-blur">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center gap-3">
+    <div class="font-mono font-bold text-lg mr-2">scrape<span class="text-neon">ops</span></div>
+    <div class="flex items-center gap-2 rounded-lg border border-line bg-ink px-3 py-1.5 text-sm">
+      <span class="w-2 h-2 rounded-full bg-neon animate-pulse"></span>
+      <span class="text-zinc-400">Проксі-пул</span>
+      <span class="font-mono text-neon">Активні: 48/50 IP</span>
+    </div>
+    <div class="flex items-center gap-2 rounded-lg border border-line bg-ink px-3 py-1.5 text-sm">
+      <span class="w-2 h-2 rounded-full bg-neon"></span>
+      <span class="text-zinc-400">Захист</span>
+      <span class="font-mono text-neon">Cloudflare Bypass: OK</span>
+    </div>
+    <button id="runBtn" class="ml-auto inline-flex items-center gap-2 rounded-lg bg-neon text-black font-semibold px-5 py-2.5 text-sm hover:brightness-110 active:scale-[.98] transition disabled:opacity-50 disabled:cursor-not-allowed">
+      <span id="runIcon"></span><span id="runText">Запустити парсинг</span>
+    </button>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+  <div>
+    <h1 class="text-2xl sm:text-3xl font-semibold tracking-tight">Моніторинг цін маркетплейсів</h1>
+    <p class="text-zinc-400 mt-1 text-sm">Порівняння наших цін з Rozetka, Prom.ua та Amazon. Усі суми в гривнях.</p>
+  </div>
+
+  <!-- Прогрес парсингу -->
+  <section class="rounded-xl border border-line bg-panel p-4">
+    <div class="flex justify-between text-sm">
+      <span id="runLabel" class="text-zinc-400">Очікування запуску</span>
+      <span id="pct" class="font-mono text-neon">0%</span>
+    </div>
+    <div id="pbar" role="progressbar" aria-label="Прогрес парсингу" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" class="mt-3 h-2 rounded-full bg-black overflow-hidden">
+      <div id="fill" class="h-full w-0 rounded-full bg-neon shadow-[0_0_12px_#2bffb0]"></div>
+    </div>
+  </section>
+
+  <!-- Картки статистики -->
+  <section id="stats" class="grid grid-cols-2 lg:grid-cols-4 gap-3"></section>
+
+  <div class="grid lg:grid-cols-5 gap-6 items-start">
+    <!-- Таблиця товарів -->
+    <section class="lg:col-span-3 rounded-xl border border-line bg-panel">
+      <div class="p-4 flex flex-wrap items-center gap-3 border-b border-line">
+        <div id="chips" class="flex flex-wrap gap-2" role="group" aria-label="Фільтр за маркетплейсом"></div>
+        <input id="q" type="search" autocomplete="off" placeholder="Пошук за назвою або SKU" aria-label="Пошук у таблиці"
+          class="ml-auto w-full sm:w-56 rounded-lg bg-ink border border-line px-3 py-2 text-sm placeholder:text-zinc-600 focus:border-neon outline-none">
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm min-w-[34rem]">
+          <thead class="text-left text-zinc-500">
+            <tr>
+              <th scope="col" class="py-3 pl-4 pr-2 font-medium"><button data-sort="name" class="hover:text-white">Назва товару <span data-ind="name"></span></button></th>
+              <th scope="col" class="py-3 px-2 font-medium text-right"><button data-sort="our" class="hover:text-white">Наша ціна <span data-ind="our"></span></button></th>
+              <th scope="col" class="py-3 px-2 font-medium text-right"><button data-sort="comp" class="hover:text-white">Ціна конкурента <span data-ind="comp"></span></button></th>
+              <th scope="col" class="py-3 pl-2 pr-4 font-medium text-right"><button data-sort="diff" class="hover:text-white">Різниця <span data-ind="diff"></span></button></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="p-4 border-t border-line flex flex-wrap items-center justify-between gap-3">
+        <p class="text-xs text-zinc-500">Різниця = наша ціна мінус ціна конкурента. Червоний: конкурент дешевший, зелений: наша ціна краща.</p>
+        <button id="exportBtn" class="inline-flex items-center gap-2 rounded-lg border border-amb text-amb px-4 py-2 text-sm font-medium hover:bg-amb hover:text-black transition">
+          <span id="dlIcon"></span>Експорт у CSV/Excel
+        </button>
+      </div>
+    </section>
+
+    <!-- Живий термінал -->
+    <section class="lg:col-span-2 rounded-xl border border-line bg-panel lg:sticky lg:top-20">
+      <div class="px-4 py-3 flex items-center justify-between border-b border-line">
+        <div class="flex items-center gap-3">
+          <h2 class="font-medium">Живий термінал</h2>
+          <span id="conState" class="rounded-full px-2.5 py-0.5 text-xs bg-zinc-800 text-zinc-400">Очікування</span>
+        </div>
+        <button id="clearBtn" class="text-xs text-zinc-500 hover:text-white transition">Очистити</button>
+      </div>
+      <div id="con" role="log" aria-label="Журнал парсингу" class="h-[30rem] overflow-y-auto bg-black rounded-b-xl p-4 font-mono text-[13px]">
+        <div id="logs"></div>
+        <span class="caret text-neon">▌</span>
+      </div>
+    </section>
+  </div>
+</main>
+
+<div id="toasts" role="status" aria-live="polite" class="fixed bottom-5 right-5 left-5 sm:left-auto z-50 flex flex-col items-end gap-2 pointer-events-none"></div>
+
+<script>
+// ================= ДАНІ =================
+// Єдине джерело правди: таблиця, статистика та експорт читають цей масив
+const DATA = [
+  { sku: 4092, name: 'Смартфон Samsung Galaxy S24 128 ГБ', market: 'Rozetka', our: 32999, comp: 31499 },
+  { sku: 5081, name: 'Робот-пилосос Xiaomi Robot Vacuum S10', market: 'Rozetka', our: 9499, comp: 9899 },
+  { sku: 7312, name: 'Монітор LG UltraGear 27"', market: 'Rozetka', our: 11299, comp: 11399 },
+  { sku: 2755, name: 'Ноутбук ASUS Vivobook 15', market: 'Prom.ua', our: 28999, comp: 27990 },
+  { sku: 6204, name: 'Електрочайник Philips HD9350', market: 'Prom.ua', our: 1799, comp: 1949 },
+  { sku: 8450, name: 'Кавомашина DeLonghi Magnifica', market: 'Prom.ua', our: 17999, comp: 17250 },
+  { sku: 3110, name: 'Навушники Sony WH-1000XM5', market: 'Amazon', our: 14299, comp: 14899 },
+  { sku: 1837, name: 'Apple AirPods Pro 2', market: 'Amazon', our: 9799, comp: 9299 }
+];
+DATA.forEach(p => p.base = p.comp); // базова ціна, навколо якої «гуляє» ціна конкурента
+
+// Сценарій по маркетплейсах для симуляції логів
+const MARKETS = [
+  { name: 'Rozetka', proxy: 'UA-Kyiv-07', note: 'Cloudflare Bypass: OK, сесію встановлено' },
+  { name: 'Prom.ua', proxy: 'UA-Lviv-12', note: 'Cloudflare challenge пройдено за 1,2 с', warn: 'Таймаут проксі UA-Lviv-12, перемикання на резервний вузол' },
+  { name: 'Amazon', proxy: 'DE-Frankfurt-03', note: 'Ціни конвертовано з USD у UAH за актуальним курсом' }
+];
+const DURATION = 4000;
+const state = { market: 'Усі', q: '', key: null, dir: 1, running: false, lastRun: null };
+
+const $ = s => document.querySelector(s);
+const fmt = n => n.toLocaleString('uk-UA') + ' ₴';
+const diff = p => p.our - p.comp;
+const pct = p => (diff(p) / p.comp * 100).toFixed(1).replace('.', ',');
+const rnd = (a, b) => Math.floor(a + Math.random() * (b - a + 1));
+const time = () => new Date().toLocaleTimeString('uk-UA', { hour12: false });
+
+const P = {
+  play: '<path d="M7 5v14l12-7-12-7Z"/>', dl: '<path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>', warn: '<path d="M12 4 3 20h18L12 4Z"/><path d="M12 10v4m0 3h.01"/>',
+  spin: '<path d="M21 12a9 9 0 1 1-6.2-8.55"/>'
+};
+const ico = (n, c = 'w-4 h-4') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="${c}" aria-hidden="true">${P[n]}</svg>`;
+
+// ================= ТАБЛИЦЯ =================
+function rows() {
+  const q = state.q.trim().toLocaleLowerCase('uk');
+  const list = DATA.filter(p => (state.market === 'Усі' || p.market === state.market) &&
+    (!q || `${p.name} ${p.sku}`.toLocaleLowerCase('uk').includes(q)));
+  if (state.key) {
+    const val = { name: p => p.name, our: p => p.our, comp: p => p.comp, diff };
+    list.sort((a, b) => state.key === 'name'
+      ? a.name.localeCompare(b.name, 'uk') * state.dir
+      : (val[state.key](a) - val[state.key](b)) * state.dir);
+  }
+  return list;
+}
+
+function diffCell(p) {
+  const d = diff(p), sign = d > 0 ? '+' : d < 0 ? '−' : '';
+  const [cls, label] = d > 0 ? ['text-bad', 'Конкурент дешевший'] : d < 0 ? ['text-neon', 'Наша ціна краща'] : ['text-zinc-400', 'Ціни рівні'];
+  return `<div class="font-mono font-medium ${cls}">${sign}${fmt(Math.abs(d))}</div>
+          <div class="text-xs ${cls} opacity-80">${sign}${pct(p).replace('-', '')}% ${label}</div>`;
+}
+
+function renderTable() {
+  const list = rows();
+  $('#rows').innerHTML = list.length ? list.map(p => {
+    const flash = p.changed ? 'flash' : '';
+    p.changed = false; // прапорець потрібен лише для одноразової підсвітки
+    return `<tr class="border-t border-line hover:bg-white/[.03] transition ${flash}">
+      <td class="py-3 pl-4 pr-2"><div class="font-medium">${p.name}</div>
+        <div class="mt-1 flex items-center gap-2 text-xs"><span class="rounded bg-ink border border-line px-1.5 py-0.5 text-zinc-300">${p.market}</span><span class="font-mono text-zinc-500">#${p.sku}</span></div></td>
+      <td class="py-3 px-2 text-right font-mono">${fmt(p.our)}</td>
+      <td class="py-3 px-2 text-right font-mono">${fmt(p.comp)}</td>
+      <td class="py-3 pl-2 pr-4 text-right">${diffCell(p)}</td></tr>`;
+  }).join('') : '<tr><td colspan="4" class="py-12 text-center text-zinc-500">Нічого не знайдено. Змініть фільтр або запит.</td></tr>';
+  document.querySelectorAll('[data-ind]').forEach(s => {
+    s.textContent = state.key === s.dataset.ind ? (state.dir > 0 ? '▲' : '▼') : '';
+    s.closest('th').setAttribute('aria-sort', state.key === s.dataset.ind ? (state.dir > 0 ? 'ascending' : 'descending') : 'none');
+  });
+}
+
+function renderChips() {
+  $('#chips').innerHTML = ['Усі', 'Rozetka', 'Prom.ua', 'Amazon'].map(m => `<button data-m="${m}" aria-pressed="${state.market === m}"
+    class="rounded-lg border px-3 py-1.5 text-sm transition ${state.market === m ? 'border-neon bg-neon/10 text-neon' : 'border-line text-zinc-400 hover:text-white'}">${m}</button>`).join('');
+}
+
+function renderStats() {
+  const dump = DATA.filter(p => diff(p) > 0).length, better = DATA.filter(p => diff(p) < 0).length;
+  const card = (label, val, cls = '') => `<div class="rounded-xl border border-line bg-panel p-4">
+    <div class="text-sm text-zinc-400">${label}</div><div class="mt-2 font-mono text-2xl font-bold ${cls}">${val}</div></div>`;
+  $('#stats').innerHTML = card('Позицій у моніторингу', DATA.length) + card('Демпінг конкурентів', dump, dump ? 'text-bad' : '') +
+    card('Наші ціни кращі', better, 'text-neon') + card('Останній запуск', state.lastRun || '—', 'text-amb');
+}
+const renderAll = () => { renderTable(); renderStats(); };
+
+// ================= ТЕРМІНАЛ =================
+const LV = { INFO: 'text-zinc-400', SUCCESS: 'text-neon', ALERT: 'text-amb', WARN: 'text-orange-300' };
+function log(lv, msg) {
+  const row = document.createElement('div');
+  row.className = 'leading-relaxed break-words';
+  row.innerHTML = `<span class="text-zinc-600">${time()}</span> <span class="${LV[lv]} font-bold">[${lv}]</span> <span class="${lv === 'ALERT' ? 'text-amb' : 'text-zinc-300'}"></span>`;
+  row.lastElementChild.textContent = msg; // textContent: без HTML-ін’єкцій
+  $('#logs').append(row);
+  while ($('#logs').children.length > 300) $('#logs').firstChild.remove();
+  $('#con').scrollTop = $('#con').scrollHeight; // автоскрол донизу
+}
+function setConState(text, cls) { const s = $('#conState'); s.textContent = text; s.className = `rounded-full px-2.5 py-0.5 text-xs ${cls}`; }
+
+// ================= СИМУЛЯЦІЯ ПАРСИНГУ =================
+// Готуємо нові ціни конкурентів заздалегідь, щоб логи збігалися з таблицею
+function nextPrices() {
+  const next = {};
+  DATA.forEach(p => next[p.sku] = Math.round(p.base * (0.94 + Math.random() * 0.10) / 10) * 10 - 1);
+  return next;
+}
+
+// Сценарій: масив подій, кожна має поріг at (0..1) — частку прогресу, після якої вона з’являється
+function buildScript(next) {
+  const s = [], add = (at, lv, msg) => s.push({ at, lv, msg });
+  add(0, 'INFO', 'Ініціалізація парсера, завантаження конфігурації…');
+  add(0.04, 'INFO', 'Перевірка пулу проксі: активні 48/50 IP');
+  MARKETS.forEach((m, k) => {
+    const b = 0.1 + k * 0.28;
+    add(b, 'INFO', `Підключення до проксі ${m.proxy}…`);
+    add(b + 0.05, 'INFO', m.note);
+    if (m.warn) add(b + 0.08, 'WARN', m.warn);
+    add(b + 0.12, 'SUCCESS', `Спарсено ${rnd(90, 230)} SKU з ${m.name}`);
+    DATA.filter(p => p.market === m.name).forEach((p, j) => {
+      if (next[p.sku] < p.our) add(b + 0.15 + j * 0.03, 'ALERT', `Виявлено демпінг ціни на товар #${p.sku}: конкурент нижче на ${fmt(p.our - next[p.sku])}`);
+    });
+  });
+  add(0.94, 'INFO', 'Збереження результатів у базу даних…');
+  add(1, 'SUCCESS', 'Парсинг завершено, ціни оновлено');
+  return s.sort((a, b) => a.at - b.at);
+}
+
+function setProgress(p) {
+  const v = Math.round(p * 100);
+  $('#fill').style.width = v + '%';
+  $('#pct').textContent = v + '%';
+  $('#pbar').setAttribute('aria-valuenow', v);
+}
+
+function startRun() {
+  if (state.running) return;
+  state.running = true;
+  const next = nextPrices(), script = buildScript(next);
+  $('#runBtn').disabled = true;
+  $('#runIcon').innerHTML = ico('spin', 'w-4 h-4 animate-spin');
+  $('#runText').textContent = 'Виконується парсинг…';
+  $('#runLabel').textContent = 'Парсинг виконується';
+  setConState('Виконується', 'bg-amb/15 text-amb');
+  setProgress(0);
+
+  const t0 = performance.now();
+  let i = 0;
+  const tick = now => {
+    const p = Math.min(1, (now - t0) / DURATION);
+    setProgress(p);
+    while (i < script.length && script[i].at <= p) { log(script[i].lv, script[i].msg); i++; }
+    if (p < 1) requestAnimationFrame(tick); else finishRun(next);
+  };
+  requestAnimationFrame(tick);
+}
+
+function finishRun(next) {
+  DATA.forEach(p => { p.changed = next[p.sku] !== p.comp; p.comp = next[p.sku]; });
+  state.running = false;
+  state.lastRun = time();
+  renderAll();
+  $('#runBtn').disabled = false;
+  $('#runIcon').innerHTML = ico('play');
+  $('#runText').textContent = 'Запустити парсинг';
+  $('#runLabel').textContent = 'Парсинг завершено';
+  setConState('Завершено', 'bg-neon/15 text-neon');
+  const n = DATA.filter(p => diff(p) > 0).length;
+  n ? toast(`Виявлено демпінг: ${n} поз.`, 'Перегляньте позиції, підсвічені червоним.', 'alert')
+    : toast('Парсинг завершено', 'Демпінгу не виявлено, наші ціни кращі.', 'ok');
+}
+
+// ================= ЕКСПОРТ =================
+function exportCSV() {
+  // Роздільник «;» і BOM потрібні, щоб Excel з українською локалізацією коректно відкрив кирилицю
+  const cell = v => /^-?[\d,]+$/.test(String(v)) ? v : `"${String(v).replace(/"/g, '""')}"`;
+  const head = ['SKU', 'Маркетплейс', 'Назва товару', 'Наша ціна, UAH', 'Ціна конкурента, UAH', 'Різниця, UAH', 'Різниця, %'];
+  const body = DATA.map(p => [p.sku, p.market, p.name, p.our, p.comp, diff(p), pct(p)]);
+  const csv = '\uFEFF' + [head, ...body].map(r => r.map(cell).join(';')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: `price-report-${new Date().toISOString().slice(0, 10)}.csv` });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  log('INFO', `Сформовано звіт: ${DATA.length} позицій, формат CSV`);
+  toast('Звіт успішно сформовано та завантажено!', 'Файл можна відкрити в Excel.', 'ok');
+}
+
+// ================= СПОВІЩЕННЯ =================
+function toast(title, text = '', kind = 'ok') {
+  const box = $('#toasts'), t = document.createElement('div');
+  const c = kind === 'alert' ? 'border-amb text-amb' : 'border-neon text-neon';
+  t.className = `toast pointer-events-auto flex items-start gap-3 rounded-xl border bg-panel pl-4 pr-5 py-3.5 shadow-2xl max-w-sm ${c}`;
+  t.innerHTML = `<span class="mt-0.5 shrink-0">${ico(kind === 'alert' ? 'warn' : 'check', 'w-5 h-5')}</span>
+    <div><p class="text-sm font-medium"></p><p class="text-xs text-zinc-400 mt-0.5"></p></div>`;
+  const [a, b] = t.querySelectorAll('p');
+  a.textContent = title; b.textContent = text;
+  while (box.children.length >= 3) box.firstChild.remove();
+  box.append(t);
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 300); }, 4000);
+}
+
+// ================= ПОДІЇ =================
+$('#runBtn').addEventListener('click', startRun);
+$('#exportBtn').addEventListener('click', exportCSV);
+$('#clearBtn').addEventListener('click', () => { $('#logs').innerHTML = ''; });
+$('#q').addEventListener('input', e => { state.q = e.target.value; renderTable(); });
+$('#chips').addEventListener('click', e => { // делегування: один слухач на всі чіпи
+  const b = e.target.closest('[data-m]');
+  if (!b) return;
+  state.market = b.dataset.m; renderChips(); renderTable();
+});
+document.querySelector('thead').addEventListener('click', e => {
+  const b = e.target.closest('[data-sort]');
+  if (!b) return;
+  state.dir = state.key === b.dataset.sort ? -state.dir : 1; // повторний клік змінює напрямок
+  state.key = b.dataset.sort; renderTable();
+});
+
+// ================= СТАРТ =================
+$('#runIcon').innerHTML = ico('play');
+$('#dlIcon').innerHTML = ico('dl');
+renderChips(); renderAll();
+log('INFO', 'Систему ініціалізовано. Очікування запуску парсингу…');
+</script>
+</body>
+</html>
